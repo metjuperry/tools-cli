@@ -15,6 +15,7 @@ public class FlowDefinitionValidatorTests
 {
     private const string TeamsConnector = "shared_teams";
     private const string ApprovalsConnector = "shared_approvals";
+    private const string OutlookConnector = "shared_office365";
 
     [Fact]
     public async Task CleanDefinition_HasNoErrors()
@@ -359,6 +360,72 @@ public class FlowDefinitionValidatorTests
     /// A stub catalog of two connectors. Anything not listed here does not
     /// exist, which is what the "invented" tests rely on.
     /// </summary>
+    [Fact]
+    public async Task FlattenedObjectParameters_AreAccepted()
+    {
+        // The form Power Automate actually writes. Rejecting it made the gate
+        // fire on correct flows for every connector with an object input.
+        var report = await ValidateAsync(BuildFlow(
+            apiId: "/providers/Microsoft.PowerApps/apis/shared_office365",
+            operationId: "SendEmailV2",
+            connectionName: OutlookConnector,
+            declaredReferenceKey: OutlookConnector,
+            parameters: """
+                {
+                  "emailMessage/To": "someone@example.com",
+                  "emailMessage/Subject": "hello",
+                  "emailMessage/Body": "<p>hi</p>"
+                }
+                """));
+
+        Assert.True(report.Valid);
+        Assert.Empty(report.Findings);
+    }
+
+    [Fact]
+    public async Task UnknownLeafUnderAStaticObject_IsStillReported()
+    {
+        // Accepting the flattened form must not degrade into accepting anything
+        // that merely starts with a known prefix.
+        var report = await ValidateAsync(BuildFlow(
+            apiId: "/providers/Microsoft.PowerApps/apis/shared_office365",
+            operationId: "SendEmailV2",
+            connectionName: OutlookConnector,
+            declaredReferenceKey: OutlookConnector,
+            parameters: """
+                {
+                  "emailMessage/To": "someone@example.com",
+                  "emailMessage/Subject": "hello",
+                  "emailMessage/Body": "<p>hi</p>",
+                  "emailMessage/NotAField": "x"
+                }
+                """));
+
+        var finding = AssertError(report, "unknown-parameter");
+        Assert.Contains("emailMessage/NotAField", finding.Message);
+    }
+
+    [Fact]
+    public async Task ParametersBeneathADynamicSchema_AreWarnedAboutNotRejected()
+    {
+        // Teams "body" fields come from GetUnifiedActionSchema, so they cannot be
+        // confirmed or refuted offline. Reporting them as unknown would reject
+        // correct definitions.
+        var report = await ValidateAsync(BuildFlow(
+            parameters: """
+                {
+                  "recipient/to": "someone@example.com",
+                  "body/messageBody": "<p>hi</p>"
+                }
+                """));
+
+        Assert.True(report.Valid);
+        var finding = Assert.Single(report.Findings);
+        Assert.Equal("unverifiable-dynamic-parameter", finding.Code);
+        Assert.Equal(FlowValidationSeverity.Warning, finding.Severity);
+        Assert.Contains("GetUnifiedActionSchema", finding.Message);
+    }
+
     private static FlowDefinitionValidator.MetadataLookup BuildLookup()
         => new(
             (connector, _) => Task.FromResult(connector switch
@@ -369,6 +436,12 @@ public class FlowDefinitionValidatorTests
                     [
                         new ConnectorOperationSummary("PostMessageToConversation", "Post a message", "POST", "/v3/beta/teams", 3, false, false),
                         new ConnectorOperationSummary("PostMessageToChannel", "Post a message (deprecated)", "POST", "/beta/teams", 3, true, false),
+                    ]),
+                OutlookConnector => new ConnectorDetail(
+                    OutlookConnector, "Office 365 Outlook",
+                    "/providers/Microsoft.PowerApps/apis/shared_office365", 1, null,
+                    [
+                        new ConnectorOperationSummary("SendEmailV2", "Send an email", "POST", "/v2/Mail", 8, false, false),
                     ]),
                 ApprovalsConnector => new ConnectorDetail(
                     ApprovalsConnector, "Approvals",
@@ -382,6 +455,7 @@ public class FlowDefinitionValidatorTests
             {
                 (TeamsConnector, "PostMessageToConversation") => TeamsPostMessage(operation, deprecated: false),
                 (TeamsConnector, "PostMessageToChannel") => TeamsPostMessage(operation, deprecated: true),
+                (OutlookConnector, "SendEmailV2") => OutlookSendEmail(),
                 (ApprovalsConnector, "StartAndWaitForAnApproval") => new OperationDetail(
                     ApprovalsConnector, "/providers/Microsoft.PowerApps/apis/shared_approvals",
                     operation, "Start and wait for an approval", null,
@@ -390,6 +464,27 @@ public class FlowDefinitionValidatorTests
                     null),
                 _ => throw new ArgumentException($"Operation '{operation}' does not exist on '{connector}'."),
             }));
+
+    /// <summary>
+    /// Mirrors what the reader now produces for an object parameter: the
+    /// flattened leaves, not the "emailMessage" wrapper.
+    /// </summary>
+    private static OperationDetail OutlookSendEmail()
+        => new(
+            OutlookConnector,
+            "/providers/Microsoft.PowerApps/apis/shared_office365",
+            "SendEmailV2",
+            "Send an email",
+            null,
+            OperationSchemaReader.OpenApiConnection,
+            false,
+            [
+                new OperationParameter("emailMessage/To", "string", true, "To", null, null, null, null, null, null),
+                new OperationParameter("emailMessage/Subject", "string", true, "Subject", null, null, null, null, null, null),
+                new OperationParameter("emailMessage/Body", "string", true, "Body", null, null, null, null, null, null),
+                new OperationParameter("emailMessage/Cc", "string", false, "CC", null, null, null, null, null, null),
+            ],
+            null);
 
     private static OperationDetail TeamsPostMessage(string operationId, bool deprecated)
         => new(
@@ -402,7 +497,8 @@ public class FlowDefinitionValidatorTests
             deprecated,
             [
                 new OperationParameter("recipient/to", "string", true, "Recipient", null, null, null, null, null, null),
-                new OperationParameter("body", "string", false, "Message body", null, null, null, null, null, null),
+                new OperationParameter("body", "object", false, "Message body", null, null, null, null, null,
+                    new DynamicValuesRef("GetUnifiedActionSchema", null)),
                 new OperationParameter("importance", "string", false, "Importance",
                     ["Normal", "High", "Urgent-High"], "Normal", null, null, null, null),
             ],

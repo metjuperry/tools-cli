@@ -262,8 +262,29 @@ internal static class FlowDefinitionValidator
             {
                 suppliedNames.Add(entry.Name);
 
+                // Exact match first: most parameters are scalars, and the spec
+                // already carries flattened names for statically known objects.
                 var spec = operation.Parameters.FirstOrDefault(p =>
                     string.Equals(p.Name, entry.Name, StringComparison.Ordinal));
+
+                if (spec is null && FindDynamicAncestor(operation, entry.Name) is { } dynamicAncestor)
+                {
+                    // The value sits beneath an object whose fields the connector
+                    // only resolves at run time, so its name can be neither
+                    // confirmed nor refuted from metadata. Saying "no such
+                    // parameter" here would reject correct definitions, so this
+                    // is reported as unchecked rather than wrong.
+                    suppliedNames.Add(dynamicAncestor.Name);
+                    findings.Add(new FlowValidationFinding(
+                        FlowValidationSeverity.Warning,
+                        $"{action.Path}/inputs/parameters/{EscapePointer(entry.Name)}",
+                        "unverifiable-dynamic-parameter",
+                        $"Parameter '{entry.Name}' could not be checked: the fields of " +
+                        $"'{dynamicAncestor.Name}' on operation '{operation.OperationId}' are resolved at " +
+                        $"design time by '{dynamicAncestor.DynamicSchema?.OperationId ?? "a connector call"}', " +
+                        "so they are not described in the operation's metadata."));
+                    continue;
+                }
 
                 if (spec is null)
                 {
@@ -291,6 +312,30 @@ internal static class FlowDefinitionValidator
                 "missing-required-parameter",
                 $"Operation '{operation.OperationId}' requires parameter '{required.Name}', which is not supplied."));
         }
+    }
+
+    /// <summary>
+    /// For a flattened name such as <c>body/messageBody</c>, returns the nearest
+    /// ancestor parameter (<c>body</c>) whose sub-schema the connector resolves at
+    /// design time, or <see langword="null"/> when no such ancestor exists.
+    /// </summary>
+    private static OperationParameter? FindDynamicAncestor(OperationDetail operation, string suppliedName)
+    {
+        var separator = suppliedName.LastIndexOf('/');
+
+        while (separator > 0)
+        {
+            var ancestorName = suppliedName[..separator];
+            var ancestor = operation.Parameters.FirstOrDefault(p =>
+                string.Equals(p.Name, ancestorName, StringComparison.Ordinal));
+
+            if (ancestor is not null)
+                return ancestor.DynamicSchema is not null ? ancestor : null;
+
+            separator = ancestorName.LastIndexOf('/');
+        }
+
+        return null;
     }
 
     private static void ValidateAllowedValue(

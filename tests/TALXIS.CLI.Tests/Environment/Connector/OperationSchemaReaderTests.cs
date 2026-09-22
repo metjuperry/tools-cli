@@ -163,6 +163,103 @@ public class OperationSchemaReaderTests
         Assert.Null(operation.ResponseSchema);
     }
 
+    [Fact]
+    public void Read_FlattensObjectParametersTheWayAFlowDefinitionWritesThem()
+    {
+        // Office 365 Outlook SendEmailV2: the wrapper is "emailMessage", and a
+        // flow definition addresses its fields as "emailMessage/To" etc.
+        var operation = Read("""
+            {
+              "properties": {
+                "inputsDefinition": {
+                  "type": "object",
+                  "required": [ "emailMessage" ],
+                  "properties": {
+                    "emailMessage": {
+                      "type": "object",
+                      "required": [ "To", "Subject" ],
+                      "properties": {
+                        "To": { "type": "string", "x-ms-summary": "To" },
+                        "Subject": { "type": "string", "x-ms-summary": "Subject" },
+                        "Importance": { "type": "string", "enum": [ "Low", "Normal", "High" ] }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            """, "SendEmailV2");
+
+        Assert.Equal(3, operation.Parameters.Count);
+        Assert.DoesNotContain(operation.Parameters, p => p.Name == "emailMessage");
+
+        var to = Assert.Single(operation.Parameters, p => p.Name == "emailMessage/To");
+        Assert.True(to.Required);
+        Assert.Equal("To", to.Description);
+
+        // Not in the nested "required" array, so optional even though its
+        // parent is required.
+        Assert.False(Assert.Single(operation.Parameters, p => p.Name == "emailMessage/Importance").Required);
+        Assert.Equal(
+            ["Low", "Normal", "High"],
+            Assert.Single(operation.Parameters, p => p.Name == "emailMessage/Importance").AllowedValues);
+    }
+
+    [Fact]
+    public void Read_FlattensNestedObjectsBeyondOneLevel()
+    {
+        var operation = Read("""
+            {
+              "properties": {
+                "inputsDefinition": {
+                  "properties": {
+                    "body": {
+                      "type": "object",
+                      "properties": {
+                        "responsev2": {
+                          "type": "object",
+                          "properties": { "text": { "type": "string" } }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            """);
+
+        Assert.Equal("body/responsev2/text", Assert.Single(operation.Parameters).Name);
+    }
+
+    [Fact]
+    public void Read_KeepsTheWrapperWhenItsFieldsAreResolvedAtDesignTime()
+    {
+        // Teams PostMessageToConversation: "body" is an object with no static
+        // properties; its real fields come from GetUnifiedActionSchema.
+        var operation = Read("""
+            {
+              "properties": {
+                "inputsDefinition": {
+                  "required": [ "body" ],
+                  "properties": {
+                    "body": {
+                      "type": "object",
+                      "x-ms-dynamic-properties": {
+                        "operationId": "GetUnifiedActionSchema",
+                        "parameters": { "actionType": { "value": "Message" } }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            """);
+
+        var body = Assert.Single(operation.Parameters);
+        Assert.Equal("body", body.Name);
+        Assert.Equal("GetUnifiedActionSchema", body.DynamicSchema?.OperationId);
+    }
+
     private static Core.Platforms.PowerPlatform.OperationDetail Read(
         string payload, string operationId = "PostMessageToConversation")
     {

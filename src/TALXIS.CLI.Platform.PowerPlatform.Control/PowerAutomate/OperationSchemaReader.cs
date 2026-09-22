@@ -97,18 +97,58 @@ internal static partial class OperationSchemaReader
         if (bag is not { } parameters)
             return [];
 
-        var required = ReadRequiredNames(definition);
         var result = new List<OperationParameter>();
+        Flatten(definition, parameters, prefix: null, parentRequired: true, result);
+        return result;
+    }
 
-        foreach (var entry in parameters.EnumerateObject())
+    /// <summary>
+    /// Walks an inputs schema and emits one parameter per <em>leaf</em>, naming
+    /// nested leaves the way a flow definition writes them: an object parameter
+    /// <c>emailMessage</c> with a <c>To</c> property becomes <c>emailMessage/To</c>.
+    /// </summary>
+    /// <remarks>
+    /// Power Automate flattens object-typed connector inputs in the definition
+    /// (<c>"emailMessage/To"</c>, <c>"item/source"</c>), so the flattened form —
+    /// not the wrapper — is what an author writes and what has to be validated
+    /// against. <see cref="SwaggerOperationIndexer"/> already counts a body
+    /// parameter by its expanded properties for the same reason.
+    /// <para>
+    /// An object whose properties are resolved at run time (Teams
+    /// <c>body</c> via <c>x-ms-dynamic-properties</c>) has no static children, so
+    /// it is emitted as the wrapper itself and its dynamic reference is preserved
+    /// — the validator treats paths beneath it as unverifiable rather than wrong.
+    /// </para>
+    /// </remarks>
+    private static void Flatten(
+        JsonElement schema,
+        JsonElement bag,
+        string? prefix,
+        bool parentRequired,
+        List<OperationParameter> result)
+    {
+        var required = ReadRequiredNames(schema);
+
+        foreach (var entry in bag.EnumerateObject())
         {
             if (entry.Value.ValueKind != JsonValueKind.Object)
                 continue;
 
-            result.Add(ReadParameter(entry.Name, entry.Value, required.Contains(entry.Name)));
-        }
+            var name = prefix is null ? entry.Name : $"{prefix}/{entry.Name}";
+            var isRequired = parentRequired && required.Contains(entry.Name);
 
-        return result;
+            // Descend only into objects that actually declare children. An
+            // object with none is either dynamically resolved or opaque; either
+            // way the wrapper is the most specific thing we can name.
+            var children = SwaggerOperationIndexer.TryGetObject(entry.Value, "properties");
+            if (children is { } nested && nested.EnumerateObject().Any())
+            {
+                Flatten(entry.Value, nested, name, isRequired, result);
+                continue;
+            }
+
+            result.Add(ReadParameter(name, entry.Value, isRequired));
+        }
     }
 
     private static HashSet<string> ReadRequiredNames(JsonElement definition)
