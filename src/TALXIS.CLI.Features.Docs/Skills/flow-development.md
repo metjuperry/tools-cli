@@ -53,6 +53,21 @@ A connector action looks like this:
 - **Use `"source": "Embedded"`** in connection references, never `Invoker`.
 - **`kind: "Http"` triggers need Premium.** Use `kind: "Button"` otherwise.
 
+## Object Parameters
+
+A flow definition addresses the fields of an object-typed input in flattened form — `emailMessage/To`,
+`item/source`, `body/messageBody` — never as a nested object. `environment_connector_operation_get` returns them
+that way, so copy the names it gives you verbatim:
+
+```
+Parameter                | Type       | Req | Description
+emailMessage/To          | string     | yes | To
+emailMessage/Subject     | string     | yes | Subject
+```
+
+Writing the nested form instead (`"emailMessage": { "To": … }`) produces a flow the platform will not run, and
+`environment_flow_validate` reports it as a missing required parameter.
+
 ## Dynamically Resolved Parameters
 
 Some parameters are not statically described. `environment_connector_operation_get` reports where their values come from:
@@ -60,9 +75,13 @@ Some parameters are not statically described. `environment_connector_operation_g
 - **`values from: <operation>`** — the allowed values are fetched at design time, so there is no static enum to check against.
 - **`sub-schema from: <operation>`** — the parameter is an object whose real fields are resolved per the values of *other* parameters. A `$ref:<name>` argument shows which ones.
 
-Teams `PostMessageToConversation` is the common example. It takes `poster`, `location` and `body`, where `body`'s fields are resolved by `GetUnifiedActionSchema` from the chosen `poster` and `location`. The flattened `body/...` names a finished action uses therefore cannot be read from the operation spec alone — they depend on those choices and require an existing connection to resolve.
+Teams `PostMessageToConversation` is the common example. It takes `poster`, `location` and `body`, where `body`'s fields are resolved by `GetUnifiedActionSchema` from the chosen `poster` and `location`. Unlike an ordinary object parameter, `body`'s fields therefore cannot be read from the operation spec — they depend on those choices and require an existing connection to resolve, so `connector operation get` reports the wrapper plus `sub-schema from: GetUnifiedActionSchema` rather than the leaves.
 
 When you hit this, do not invent the sub-field names. Copy them from a working flow that already uses the same poster and location combination, or build that one action in the designer once and export it.
+
+`environment_flow_validate` cannot check these either. It reports each one as a
+`[unverifiable-dynamic-parameter]` **warning** naming the resolver operation, which does not fail the command —
+so a correct definition still passes, and you are told exactly which values went unchecked.
 
 ## What NOT to Do
 
@@ -85,7 +104,7 @@ When you hit this, do not invent the sub-field names. Copy them from a working f
 |---|---|
 | Connector and operation exist | Invented connectors and operation IDs |
 | Declared type matches metadata | An approval declared as a plain connection |
-| Parameter names exist | Misspellings and imagined parameters |
+| Parameter names exist | Misspellings and imagined parameters, including flattened leaves such as `emailMessage/Subjekt` |
 | Required parameters present | Omissions |
 | Enum values allowed | Guessed literals |
 | Connection references resolve | Bindings a solution import cannot satisfy |
